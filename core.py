@@ -85,6 +85,9 @@ class _PGCursor:
         sql = sql.replace("?", "%s")
         sql = sql.replace("date('now','-6 day')", "(CURRENT_DATE - INTERVAL '6 days')")
         sql = sql.replace("date('now','-29 day')", "(CURRENT_DATE - INTERVAL '29 days')")
+        # SQLite accepts date(text); PostgreSQL needs an explicit cast.
+        for field in ("reviewed_at", "created_at", "started_at"):
+            sql = sql.replace(f"date({field})", f"CAST({field} AS DATE)")
         return sql
 
     def execute(self, sql, params=None):
@@ -622,55 +625,107 @@ def copy_shared_deck(user_id, share_code):
 # SPACED REPETITION
 # ============================================================
 
+def _schedule_for_rating(card, rating):
+    """Return an Anki/SM-2-inspired next interval for a card.
+
+    This keeps the model deliberately simple and transparent: first reviews
+    use distinct learning steps, then mature cards grow from their current
+    interval and ease.
+    """
+    ease = max(1.3, float(card["ease"] or 2.5))
+    reps = int(card["repetitions"] or 0)
+    interval = int(card["interval_days"] or 0)
+    rating = str(rating or "Good")
+
+    if rating == "Again":
+        next_reps = 0
+        next_interval = 1
+        next_ease = max(1.3, ease - 0.20)
+    elif rating == "Hard":
+        next_reps = reps + 1
+        if reps == 0:
+            next_interval = 2
+        elif reps == 1:
+            next_interval = 4
+        else:
+            next_interval = max(2, round(interval * 1.20))
+        next_ease = max(1.3, ease - 0.05)
+    elif rating == "Easy":
+        next_reps = reps + 1
+        if reps == 0:
+            next_interval = 7
+        elif reps == 1:
+            next_interval = 14
+        else:
+            next_interval = max(5, round(interval * ease * 1.30))
+        next_ease = min(3.0, ease + 0.05)
+    else:  # Good
+        next_reps = reps + 1
+        if reps == 0:
+            next_interval = 4
+        elif reps == 1:
+            next_interval = 8
+        else:
+            next_interval = max(3, round(interval * ease))
+        next_ease = ease
+
+    due = date.today() + timedelta(days=next_interval)
+    return {
+        "rating": rating,
+        "interval_days": next_interval,
+        "repetitions": next_reps,
+        "ease": round(next_ease, 2),
+        "due_date": due.isoformat(),
+    }
+
+
+def review_schedule_preview(user_id, card_id):
+    if not user_id or not card_id:
+        return {}
+    con = db()
+    card = con.execute("""
+        SELECT c.* FROM cards c
+        JOIN decks d ON d.id=c.deck_id
+        WHERE c.id=? AND d.owner_id=?
+    """, (int(card_id), user_id)).fetchone()
+    con.close()
+    if not card:
+        return {}
+    return {r: _schedule_for_rating(card, r) for r in ("Again", "Hard", "Good", "Easy")}
+
+
 def review_card(user_id, card_id, rating):
     if not user_id or not card_id:
-        return "🔒 Đăng nhập trước.", refresh_review(user_id)
+        return "🔒 Đăng nhập trước.", None
 
     con = db()
-    card = con.execute(
-        "SELECT * FROM cards WHERE id=?", (int(card_id),)
-    ).fetchone()
+    card = con.execute("""
+        SELECT c.* FROM cards c
+        JOIN decks d ON d.id=c.deck_id
+        WHERE c.id=? AND d.owner_id=?
+    """, (int(card_id), user_id)).fetchone()
     if not card:
         con.close()
-        return "❌ Card không tồn tại.", refresh_review(user_id)
+        return "❌ Card không tồn tại.", None
 
-    ease = float(card["ease"])
-    reps = int(card["repetitions"])
-    interval = int(card["interval_days"])
-
-    # Lightweight SM-2 style scheduling:
-    # Again -> reset; Hard -> shorter interval; Good -> normal growth;
-    # Easy -> stronger growth.
-    if rating == "Again":
-        reps = 0
-        interval = 1
-        ease = max(1.3, ease - 0.20)
-    elif rating == "Hard":
-        reps += 1
-        interval = max(1, round(interval * 1.2)) if interval else 1
-        ease = max(1.3, ease - 0.05)
-    elif rating == "Good":
-        reps += 1
-        interval = 1 if interval == 0 else max(2, round(interval * ease))
-    else:  # Easy
-        reps += 1
-        interval = 2 if interval == 0 else max(3, round(interval * ease * 1.3))
-        ease += 0.05
-
-    due = (date.today() + timedelta(days=interval)).isoformat()
-
+    schedule = _schedule_for_rating(card, rating)
     con.execute("""
         UPDATE cards SET ease=?,interval_days=?,repetitions=?,due_date=?
         WHERE id=?
-    """, (ease, interval, reps, due, card["id"]))
+    """, (schedule["ease"], schedule["interval_days"], schedule["repetitions"], schedule["due_date"], card["id"]))
     con.execute("""
         INSERT INTO reviews(user_id,card_id,deck_id,rating,reviewed_at)
         VALUES(?,?,?,?,?)
     """, (user_id, card["id"], card["deck_id"], rating, now()))
     con.commit()
     con.close()
-    return f"✅ {rating} → ôn lại sau **{interval} ngày**.", refresh_review(user_id)
 
+    due_label = date.fromisoformat(schedule["due_date"]).strftime("%d/%m")
+    return (
+        f"✅ **{rating}** · ôn lại sau **{schedule["interval_days"]} ngày** "
+        f"(**{due_label}**) · độ ổn định {schedule["ease"]:.2f}",
+        schedule,
+    )
 
 def get_due_cards(user_id, deck_id=None):
     if not user_id:
@@ -919,52 +974,66 @@ def tracking_html(user_id):
         return "<div class='empty'>🔒 Đăng nhập để xem progress.</div>"
 
     con = db()
-    total = con.execute("""
-        SELECT COUNT(*) n FROM cards c
-        JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=?
-    """, (user_id,)).fetchone()["n"]
+    total = con.execute("""SELECT COUNT(*) n FROM cards c JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=?""", (user_id,)).fetchone()["n"]
+    due = con.execute("""SELECT COUNT(*) n FROM cards c JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=? AND c.due_date<=?""", (user_id, today())).fetchone()["n"]
+    today_reviews = con.execute("SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)=?", (user_id, today())).fetchone()["n"]
+    week_reviews = con.execute("SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)>=date('now','-6 day')", (user_id,)).fetchone()["n"]
+    month_reviews = con.execute("SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)>=date('now','-29 day')", (user_id,)).fetchone()["n"]
+    ex_total = con.execute("SELECT COUNT(*) n FROM exercise_attempts WHERE user_id=?", (user_id,)).fetchone()["n"]
+    ex_correct = con.execute("SELECT COALESCE(SUM(correct),0) n FROM exercise_attempts WHERE user_id=?", (user_id,)).fetchone()["n"]
 
-    due = con.execute("""
-        SELECT COUNT(*) n FROM cards c
-        JOIN decks d ON d.id=c.deck_id
-        WHERE d.owner_id=? AND c.due_date<=?
-    """, (user_id, today())).fetchone()["n"]
-
-    today_reviews = con.execute("""
-        SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)=?
-    """, (user_id, today())).fetchone()["n"]
-
-    week_reviews = con.execute("""
-        SELECT COUNT(*) n FROM reviews
-        WHERE user_id=? AND date(reviewed_at)>=date('now','-6 day')
-    """, (user_id,)).fetchone()["n"]
-
-    month_reviews = con.execute("""
-        SELECT COUNT(*) n FROM reviews
-        WHERE user_id=? AND date(reviewed_at)>=date('now','-29 day')
-    """, (user_id,)).fetchone()["n"]
-
-    ex_total = con.execute(
-        "SELECT COUNT(*) n FROM exercise_attempts WHERE user_id=?", (user_id,)
-    ).fetchone()["n"]
-    ex_correct = con.execute(
-        "SELECT COALESCE(SUM(correct),0) n FROM exercise_attempts WHERE user_id=?", (user_id,)
-    ).fetchone()["n"]
+    cards = con.execute("""
+        SELECT c.word,c.meaning,c.ease,c.interval_days,c.repetitions,c.due_date,d.name deck
+        FROM cards c JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=? ORDER BY c.repetitions DESC,c.interval_days DESC,c.word
+    """, (user_id,)).fetchall()
+    review_rows = con.execute("""
+        SELECT date(reviewed_at) d, COUNT(*) n FROM reviews
+        WHERE user_id=? AND date(reviewed_at)>=date('now','-13 day')
+        GROUP BY date(reviewed_at) ORDER BY d
+    """, (user_id,)).fetchall()
     con.close()
 
     accuracy = round(ex_correct / ex_total * 100) if ex_total else 0
+    mastered = sum(1 for c in cards if int(c["repetitions"] or 0) >= 5 or int(c["interval_days"] or 0) >= 30)
+    learning = sum(1 for c in cards if int(c["repetitions"] or 0) <= 1)
+    familiar = max(0, len(cards) - mastered - learning)
+    mastery_avg = round(sum(min(100, 18 + int(c["repetitions"] or 0)*11 + min(30, int(c["interval_days"] or 0))) for c in cards) / len(cards)) if cards else 0
+
+    counts = {str(r["d"]): int(r["n"] or 0) for r in review_rows}
+    chart = []
+    max_count = max([1] + list(counts.values()))
+    for i in range(13, -1, -1):
+        d = date.today() - timedelta(days=i)
+        n = counts.get(d.isoformat(), 0)
+        h = round(100*n/max_count) if n else 4
+        chart.append(f"<div class='bar-col' title='{d.strftime('%d/%m')}: {n} reviews'><div class='bar-value'>{n}</div><div class='bar' style='height:{h}%'></div><span>{d.strftime('%d')}</span></div>")
+
+    top_cards = sorted(cards, key=lambda c: (int(c["repetitions"] or 0), int(c["interval_days"] or 0)), reverse=True)[:8]
+    word_rows=[]
+    for c in top_cards:
+        reps=int(c["repetitions"] or 0); interval=int(c["interval_days"] or 0); score=min(100,18+reps*11+min(30,interval))
+        word_rows.append(f"<div class='mastery-row'><div class='mastery-word'><b>{html.escape(str(c['word']))}</b><small>{html.escape(str(c['deck']))} · {reps} reviews · {interval}d interval</small></div><div class='mastery-track'><i style='width:{score}%'></i></div><strong>{score}%</strong></div>")
 
     return f"""
-    <div class='stats'>
-      <div class='stat'><b>{total}</b><span>Total cards</span></div>
-      <div class='stat'><b>{due}</b><span>Due today</span></div>
-      <div class='stat'><b>{today_reviews}</b><span>Today</span></div>
-      <div class='stat'><b>{week_reviews}</b><span>7 days</span></div>
-      <div class='stat'><b>{month_reviews}</b><span>30 days</span></div>
-      <div class='stat'><b>{accuracy}%</b><span>Exercise accuracy</span></div>
-    </div>
-    <div class='progress-note'>📅 Review history is stored per account and survives refresh/login.</div>
-    """
+    <div class='progress-page'>
+      <div class='progress-hero'>
+        <div><span class='eyebrow'>LEARNING PROGRESS</span><h2>Your spaced-repetition record</h2><p>Track what you have learned, what is due, and how your memory intervals are growing.</p></div>
+        <div class='mastery-ring' style='--p:{mastery_avg}%'><div><b>{mastery_avg}%</b><span>overall mastery</span></div></div>
+      </div>
+      <div class='progress-stats'>
+        <div class='progress-stat'><span>📚</span><b>{total}</b><small>Total words</small></div>
+        <div class='progress-stat'><span>🔔</span><b>{due}</b><small>Due today</small></div>
+        <div class='progress-stat'><span>⚡</span><b>{today_reviews}</b><small>Reviewed today</small></div>
+        <div class='progress-stat'><span>📈</span><b>{week_reviews}</b><small>Last 7 days</small></div>
+        <div class='progress-stat'><span>🎯</span><b>{accuracy}%</b><small>Exercise accuracy</small></div>
+      </div>
+      <div class='progress-grid'>
+        <div class='cardish progress-chart-card'><div class='panel-head'><div><h3>Review rhythm</h3><p>Reviews completed over the last 14 days</p></div><span class='chart-total'>{month_reviews} / 30 days</span></div><div class='bar-chart'>{''.join(chart)}</div></div>
+        <div class='cardish mastery-card'><div class='panel-head'><div><h3>Vocabulary stages</h3><p>Based on repetitions and interval growth</p></div></div><div class='stage-bars'><div><span>Learning</span><i><em style='width:{(learning/len(cards)*100) if cards else 0:.0f}%'></em></i><b>{learning}</b></div><div><span>Familiar</span><i><em style='width:{(familiar/len(cards)*100) if cards else 0:.0f}%'></em></i><b>{familiar}</b></div><div><span>Mastered</span><i><em style='width:{(mastered/len(cards)*100) if cards else 0:.0f}%'></em></i><b>{mastered}</b></div></div><div class='stage-legend'><span>0–1 reviews</span><span>2–4 reviews</span><span>5+ / 30d+</span></div></div>
+      </div>
+      <div class='cardish words-progress'><div class='panel-head'><div><h3>Words you know best</h3><p>Your strongest cards and their current memory interval</p></div></div>{''.join(word_rows) if word_rows else '<div class="empty">Start reviewing vocabulary to build your mastery chart.</div>'}</div>
+      <div class='progress-tip'>💡 <b>How it works:</b> Again resets a card to 1 day, Hard grows slowly, Good grows normally, and Easy grows fastest. Each review changes the next interval instead of using one fixed date.</div>
+    </div>"""
 
 
 # ============================================================

@@ -49,6 +49,7 @@ class CardIn(BaseModel):
 class ReviewIn(BaseModel):
     card_id: int
     rating: str
+    deck_id: Optional[int] = None
 class TestStart(BaseModel):
     deck_id: Optional[int] = None
     count: int = 5
@@ -180,11 +181,15 @@ def copy_deck(request:Request, body:dict):
 @app.get("/api/review")
 def review(request:Request,deck_id:Optional[int]=None):
     uid=require_user(request); rows=core.get_due_cards(uid,deck_id); card=rowdict(rows[0]) if rows else None
-    return {"card":card,"count":len(rows)}
+    return {"card":card,"count":len(rows),"schedule":core.review_schedule_preview(uid, card["id"] if card else None)}
 
 @app.post("/api/review")
 def review_api(request:Request,data:ReviewIn):
-    uid=require_user(request); msg,_=core.review_card(uid,data.card_id,data.rating); rows=core.get_due_cards(uid); return {"message":msg,"card":rowdict(rows[0]) if rows else None,"count":len(rows)}
+    uid=require_user(request)
+    msg,schedule=core.review_card(uid,data.card_id,data.rating)
+    rows=core.get_due_cards(uid,data.deck_id)
+    card=rowdict(rows[0]) if rows else None
+    return {"message":msg,"card":card,"count":len(rows),"schedule":core.review_schedule_preview(uid, card["id"] if card else None)}
 
 @app.post("/api/test/start")
 def test_start(request:Request,data:TestStart):
