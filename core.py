@@ -84,10 +84,12 @@ class _PGCursor:
     def _sql(self, sql):
         sql = sql.replace("?", "%s")
         sql = sql.replace("date('now','-6 day')", "(CURRENT_DATE - INTERVAL '6 days')")
+        sql = sql.replace("date('now','-13 day')", "(CURRENT_DATE - INTERVAL '13 days')")
         sql = sql.replace("date('now','-29 day')", "(CURRENT_DATE - INTERVAL '29 days')")
-        # SQLite accepts date(text); PostgreSQL needs an explicit cast.
+        # Timestamp fields are stored as ISO text (YYYY-MM-DDTHH:MM:SS).
+        # PostgreSQL should use the date prefix instead of casting the full text.
         for field in ("reviewed_at", "created_at", "started_at"):
-            sql = sql.replace(f"date({field})", f"CAST(LEFT({field}, 10) AS DATE)")
+            sql = sql.replace(f"date({field})", f"LEFT({field}, 10)::date")
         return sql
 
     def execute(self, sql, params=None):
@@ -903,16 +905,10 @@ def dashboard_html(user_id):
     con.close()
     accuracy = round(ex_correct / ex_total * 100) if ex_total else 0
 
-    # Compact study activity graph: current month + previous 9 months (10 months total).
-    # Start on the Sunday of the week containing the first day of the oldest month,
-    # so the current month is always visible instead of being clipped off-screen.
+    # Codeforces-like contribution graph: 53 columns x 7 rows, ending today.
     end = date.today()
-    first_of_current = end.replace(day=1)
-    month_index = first_of_current.month - 1 - 9
-    start_year = first_of_current.year + month_index // 12
-    start_month = month_index % 12 + 1
-    oldest = date(start_year, start_month, 1)
-    start = oldest - timedelta(days=(oldest.weekday()+1)%7)  # Sunday
+    start = end - timedelta(days=370)
+    start -= timedelta(days=(start.weekday()+1)%7)  # Sunday
     days = []
     d = start
     while d <= end:
@@ -962,7 +958,7 @@ def dashboard_html(user_id):
         <div class='dash-stat'><span class='stat-icon'>🎯</span><b>{accuracy}%</b><small>Accuracy</small></div>
       </div>
       <div class='record-grid'>
-        <div class='activity-panel cardish'><div class='panel-head'><div><h3>Study Activity</h3><p>Your learning rhythm over the past 10 months</p></div><span class='legend'>Less <i class='l0'></i><i class='l1'></i><i class='l2'></i><i class='l3'></i><i class='l4'></i> More</span></div>
+        <div class='activity-panel cardish'><div class='panel-head'><div><h3>Contribution activity</h3><p>Study actions over the last year</p></div><span class='legend'>Less <i class='l0'></i><i class='l1'></i><i class='l2'></i><i class='l3'></i><i class='l4'></i> More</span></div>
           <div class='month-labels' style='grid-template-columns:repeat({weeks}, 1fr)'>{''.join(month_labels)}</div>
           <div class='heatmap-wrap'><div class='weekday-labels'><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div><div class='heatmap' style='grid-template-columns:repeat({weeks}, 1fr)'>{''.join(days)}</div></div>
         </div>
@@ -1649,5 +1645,4 @@ OXYZ_IFRAME = f"""
 <iframe srcdoc="{html.escape(OXYZ_HTML, quote=True)}"
 class="oxyz-frame" title="OXYZ 3D Simulator"></iframe>
 """
-
 
