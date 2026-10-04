@@ -70,41 +70,64 @@ $$('[data-atab]').forEach(b=>b.onclick=()=>{$$('[data-atab]').forEach(x=>x.class
 /* ---------- AI ---------- */
 $('#chatImage').onchange=()=>{$('#imageName').textContent=$('#chatImage').files[0]?.name||''};
 $('#chatForm').onsubmit=async e=>{e.preventDefault();const text=$('#chatInput').value.trim(),file=$('#chatImage').files[0];if(!text&&!file)return;const previous=chatHistory.slice();chatHistory.push([text||'📷 Image','Thinking…']);renderChat();let fd=new FormData();fd.append('message',text);fd.append('history',JSON.stringify(previous));if(file)fd.append('image',file);$('#chatInput').value='';try{const d=await api('/api/ai',{method:'POST',body:fd});chatHistory=d.history;renderChat();$('#chatImage').value='';$('#imageName').textContent=''}catch(err){chatHistory=previous;renderChat();toast('AI error: '+err.message)}};
-function normalizeMathDelimiters(text){
-  // marked treats \[ and \( as Markdown escapes, so it removes the backslash
-  // before MathJax gets a chance to see the delimiter. Convert display/inline
-  // delimiters to $$ / $ before Markdown parsing. Keep the LaTeX commands
-  // inside untouched (\\frac, \\cdot, \\binom, \\begin, ...).
-  return String(text ?? '')
-    .replace(/\\\[/g, '\n\n$$\n')
-    .replace(/\\\]/g, '\n$$\n\n')
-    .replace(/\\\(/g, '$')
-    .replace(/\\\)/g, '$');
+function escapeMathHtml(s){
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// Keep LaTeX away from Markdown parsing. Marked interprets backslashes such as
+// \[ and \( as Markdown escapes, which can destroy MathJax delimiters.
 function renderAIText(text){
-  const raw=String(text??'');
-  const mathSafe=normalizeMathDelimiters(raw);
+  const raw=String(text ?? '');
+  const math=[];
+
+  // Capture display math first.
+  let protectedText=raw
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_,body)=>`@@MATH_DISPLAY_${math.push({display:true,body})-1}@@`)
+    .replace(/\$\$([\s\S]*?)\$\$/g, (_,body)=>`@@MATH_DISPLAY_${math.push({display:true,body})-1}@@`)
+    .replace(/\\\(([^\n]*?)\\\)/g, (_,body)=>`@@MATH_INLINE_${math.push({display:false,body})-1}@@`)
+    .replace(/(^|[^\\])\$([^$\n]+?)\$/g, (m,prefix,body)=>`${prefix}@@MATH_INLINE_${math.push({display:false,body})-1}@@`);
+
+  let html='';
   try{
-    if(window.marked && window.DOMPurify){
-      const html=window.marked.parse(mathSafe,{breaks:true,gfm:true});
-      return window.DOMPurify.sanitize(html,{USE_PROFILES:{html:true}});
+    if(window.marked){
+      html=window.marked.parse(protectedText,{breaks:true,gfm:true});
+    }else{
+      html=esc(protectedText).replace(/\n/g,'<br>');
     }
-  }catch(e){console.warn('Markdown render failed',e)}
-  return esc(mathSafe).replace(/\n/g,'<br>');
+  }catch(e){
+    console.warn('Markdown render failed',e);
+    html=esc(protectedText).replace(/\n/g,'<br>');
+  }
+
+  // Restore math AFTER Markdown parsing, so the TeX reaches MathJax intact.
+  html=html.replace(/@@MATH_(DISPLAY|INLINE)_(\d+)@@/g,(_,kind,index)=>{
+    const item=math[Number(index)];
+    if(!item)return '';
+    const body=escapeMathHtml(item.body);
+    return item.display ? `<div class="math-display">\\[${body}\\]</div>` : `<span class="math-inline">\\(${body}\\)</span>`;
+  });
+
+  // Sanitize ordinary AI HTML, but keep our MathJax delimiters as text inside
+  // span/div elements. DOMPurify does not need to understand TeX.
+  if(window.DOMPurify){
+    html=window.DOMPurify.sanitize(html,{USE_PROFILES:{html:true}});
+  }
+  return html;
 }
+
 async function typesetAI(){
   try{
-    if(window.MathJax?.startup?.promise) await window.MathJax.startup.promise;
-    if(window.MathJax?.typesetPromise) await window.MathJax.typesetPromise([$('#chatMessages')]);
+    if(!window.MathJax){
+      console.warn('MathJax has not loaded yet');
+      return;
+    }
+    if(window.MathJax.startup?.promise) await window.MathJax.startup.promise;
+    if(window.MathJax.typesetClear) window.MathJax.typesetClear([$('#chatMessages')]);
+    if(window.MathJax.typesetPromise) await window.MathJax.typesetPromise([$('#chatMessages')]);
   }catch(e){console.warn('MathJax render failed',e)}
 }
-window.addEventListener('load',()=>setTimeout(typesetAI,100));
-function renderChat(){
-  if(!chatHistory.length){$('#chatMessages').innerHTML='<div class="chat-empty"><span>✦</span><h3>What are you stuck on?</h3><p>Send a question or upload your worksheet.</p></div>';return}
-  $('#chatMessages').innerHTML=chatHistory.map(x=>`<div class="msg-bubble msg-user">${esc(x[0]||'')}</div><div class="msg-bubble msg-ai ai-markdown">${renderAIText(x[1]||'')}</div>`).join('');
-  const box=$('#chatMessages');box.scrollTo({top:box.scrollHeight,behavior:'smooth'});typesetAI();
-}
+
+window.addEventListener('load',()=>setTimeout(typesetAI,300));
 
 /* ---------- Language + theme ---------- */
 const I18N={
