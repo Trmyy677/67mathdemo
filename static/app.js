@@ -70,15 +70,28 @@ $$('[data-atab]').forEach(b=>b.onclick=()=>{$$('[data-atab]').forEach(x=>x.class
 /* ---------- AI ---------- */
 $('#chatImage').onchange=()=>{$('#imageName').textContent=$('#chatImage').files[0]?.name||''};
 $('#chatForm').onsubmit=async e=>{e.preventDefault();const text=$('#chatInput').value.trim(),file=$('#chatImage').files[0];if(!text&&!file)return;const previous=chatHistory.slice();chatHistory.push([text||'📷 Image','Thinking…']);renderChat();let fd=new FormData();fd.append('message',text);fd.append('history',JSON.stringify(previous));if(file)fd.append('image',file);$('#chatInput').value='';try{const d=await api('/api/ai',{method:'POST',body:fd});chatHistory=d.history;renderChat();$('#chatImage').value='';$('#imageName').textContent=''}catch(err){chatHistory=previous;renderChat();toast('AI error: '+err.message)}};
+function normalizeMathDelimiters(text){
+  // marked treats \[ and \( as Markdown escapes, so it removes the backslash
+  // before MathJax gets a chance to see the delimiter. Convert display/inline
+  // delimiters to $$ / $ before Markdown parsing. Keep the LaTeX commands
+  // inside untouched (\\frac, \\cdot, \\binom, \\begin, ...).
+  return String(text ?? '')
+    .replace(/\\\[/g, '\n\n$$\n')
+    .replace(/\\\]/g, '\n$$\n\n')
+    .replace(/\\\(/g, '$')
+    .replace(/\\\)/g, '$');
+}
+
 function renderAIText(text){
   const raw=String(text??'');
+  const mathSafe=normalizeMathDelimiters(raw);
   try{
     if(window.marked && window.DOMPurify){
-      const html=window.marked.parse(raw,{breaks:true,gfm:true});
+      const html=window.marked.parse(mathSafe,{breaks:true,gfm:true});
       return window.DOMPurify.sanitize(html,{USE_PROFILES:{html:true}});
     }
   }catch(e){console.warn('Markdown render failed',e)}
-  return esc(raw).replace(/\n/g,'<br>');
+  return esc(mathSafe).replace(/\n/g,'<br>');
 }
 async function typesetAI(){
   try{
