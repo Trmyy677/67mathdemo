@@ -84,10 +84,12 @@ class _PGCursor:
     def _sql(self, sql):
         sql = sql.replace("?", "%s")
         sql = sql.replace("date('now','-6 day')", "(CURRENT_DATE - INTERVAL '6 days')")
+        sql = sql.replace("date('now','-13 day')", "(CURRENT_DATE - INTERVAL '13 days')")
         sql = sql.replace("date('now','-29 day')", "(CURRENT_DATE - INTERVAL '29 days')")
-        # SQLite accepts date(text); PostgreSQL needs an explicit cast.
+        # Timestamp fields are stored as ISO text (YYYY-MM-DDTHH:MM:SS).
+        # PostgreSQL should use the date prefix instead of casting the full text.
         for field in ("reviewed_at", "created_at", "started_at"):
-            sql = sql.replace(f"date({field})", f"CAST({field} AS DATE)")
+            sql = sql.replace(f"date({field})", f"LEFT({field}, 10)::date")
         return sql
 
     def execute(self, sql, params=None):
