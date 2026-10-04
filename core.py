@@ -50,13 +50,12 @@ gr = _GradioShim()
 # ============================================================
 
 DB_PATH = os.getenv("DB_PATH", "67math.db")
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "").strip()
+USE_SUPABASE = bool(SUPABASE_DB_URL)
+
 # ========================= AI CONFIG =========================
-# Put your OpenAI key HERE. Do NOT put it in the web UI.
-# Example: OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxx"
-# Never commit your OpenAI API key. Set it as a deployment secret/environment variable.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
-# The API key is intentionally configured in this Python file, not exposed in the frontend.
 AI_CUSTOM_PROMPT = """You are 67Math Tutor, a friendly high-school mathematics tutor.
 Explain step-by-step, check calculations carefully, use clean Markdown and LaTeX, and never output raw HTML.
 Use Vietnamese when the student writes Vietnamese and English when the student writes English.
@@ -73,108 +72,153 @@ TOPICS = [
 # ============================================================
 # DATABASE
 # ============================================================
+# 67Math uses the same application-level queries for local development and
+# Supabase PostgreSQL. Set SUPABASE_DB_URL on Render to switch to Supabase.
+# The URL is the Postgres connection string from Supabase, never a browser key.
+
+class _PGCursor:
+    def __init__(self, cur):
+        self._cur = cur
+        self.lastrowid = None
+
+    def _sql(self, sql):
+        sql = sql.replace("?", "%s")
+        sql = sql.replace("date('now','-6 day')", "(CURRENT_DATE - INTERVAL '6 days')")
+        sql = sql.replace("date('now','-13 day')", "(CURRENT_DATE - INTERVAL '13 days')")
+        sql = sql.replace("date('now','-29 day')", "(CURRENT_DATE - INTERVAL '29 days')")
+        # Timestamp fields are stored as ISO text (YYYY-MM-DDTHH:MM:SS).
+        # PostgreSQL should use the date prefix instead of casting the full text.
+        for field in ("reviewed_at", "created_at", "started_at"):
+            sql = sql.replace(f"date({field})", f"LEFT({field}, 10)::date")
+        return sql
+
+    def execute(self, sql, params=None):
+        sql2 = self._sql(sql)
+        # Existing code relies on SQLite's lastrowid for a few tables.
+        # PostgreSQL exposes the generated id through RETURNING instead.
+        if re.match(r"\s*INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", sql2, re.I) and "RETURNING" not in sql2.upper():
+            table = re.match(r"\s*INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", sql2, re.I).group(1).lower()
+            if table in {"users","decks","cards","reviews","exercise_attempts","chat_messages","usage_sessions"}:
+                sql2 = sql2.rstrip().rstrip(";") + " RETURNING id"
+                self._cur.execute(sql2, params)
+                row = self._cur.fetchone()
+                self.lastrowid = row["id"] if row else None
+                return self
+        self._cur.execute(sql2, params)
+        return self
+
+    def executemany(self, sql, seq):
+        self._cur.executemany(self._sql(sql), seq)
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def close(self):
+        self._cur.close()
+
+class _PGConnection:
+    def __init__(self, conn):
+        self._conn = conn
+    def execute(self, sql, params=None):
+        c = _PGCursor(self._conn.cursor(row_factory=self._dict_row()))
+        c.execute(sql, params)
+        return c
+    @staticmethod
+    def _dict_row():
+        from psycopg.rows import dict_row
+        return dict_row
+    def cursor(self):
+        return _PGCursor(self._conn.cursor(row_factory=self._dict_row()))
+    def commit(self): self._conn.commit()
+    def rollback(self): self._conn.rollback()
+    def close(self): self._conn.close()
+
 
 def db():
+    if USE_SUPABASE:
+        import psycopg
+        return _PGConnection(psycopg.connect(SUPABASE_DB_URL))
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     return con
 
 
+def _init_supabase_db():
+    import psycopg
+    from psycopg.rows import dict_row
+    conn = psycopg.connect(SUPABASE_DB_URL)
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL, full_name TEXT DEFAULT '', dob TEXT DEFAULT '', profile_pic TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS decks (
+                id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL, description TEXT DEFAULT '', share_code TEXT UNIQUE, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cards (
+                id BIGSERIAL PRIMARY KEY, deck_id BIGINT NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+                word TEXT NOT NULL, meaning TEXT DEFAULT '', pronunciation TEXT DEFAULT '', example TEXT DEFAULT '',
+                notes TEXT DEFAULT '', tags TEXT DEFAULT '', ease DOUBLE PRECISION DEFAULT 2.5, interval_days INTEGER DEFAULT 0,
+                repetitions INTEGER DEFAULT 0, due_date TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS reviews (
+                id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                card_id BIGINT REFERENCES cards(id) ON DELETE SET NULL, deck_id BIGINT REFERENCES decks(id) ON DELETE SET NULL,
+                rating TEXT NOT NULL, reviewed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS exercise_attempts (
+                id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, topic TEXT NOT NULL,
+                difficulty TEXT NOT NULL, question_type TEXT NOT NULL, correct INTEGER NOT NULL, answer TEXT, expected TEXT, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token TEXT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS usage_sessions (
+                id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL, last_seen TEXT NOT NULL, total_seconds INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_decks_owner ON decks(owner_id);
+            CREATE INDEX IF NOT EXISTS idx_cards_deck ON cards(deck_id);
+            CREATE INDEX IF NOT EXISTS idx_reviews_user ON reviews(user_id);
+            CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(reviewed_at);
+            CREATE INDEX IF NOT EXISTS idx_exercise_user ON exercise_attempts(user_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_sessions(user_id);
+            """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db():
+    if USE_SUPABASE:
+        _init_supabase_db()
+        return
     con = db()
     con.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS decks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        share_code TEXT UNIQUE,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS cards (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        deck_id INTEGER NOT NULL,
-        word TEXT NOT NULL,
-        meaning TEXT DEFAULT '',
-        pronunciation TEXT DEFAULT '',
-        example TEXT DEFAULT '',
-        notes TEXT DEFAULT '',
-        tags TEXT DEFAULT '',
-        ease REAL DEFAULT 2.5,
-        interval_days INTEGER DEFAULT 0,
-        repetitions INTEGER DEFAULT 0,
-        due_date TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(deck_id) REFERENCES decks(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        card_id INTEGER,
-        deck_id INTEGER,
-        rating TEXT NOT NULL,
-        reviewed_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE SET NULL,
-        FOREIGN KEY(deck_id) REFERENCES decks(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS exercise_attempts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        topic TEXT NOT NULL,
-        difficulty TEXT NOT NULL,
-        question_type TEXT NOT NULL,
-        correct INTEGER NOT NULL,
-        answer TEXT,
-        expected TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS chat_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS auth_sessions (
-        token TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS usage_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        started_at TEXT NOT NULL,
-        last_seen TEXT NOT NULL,
-        total_seconds INTEGER DEFAULT 0,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
+    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS decks (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT DEFAULT '', share_code TEXT UNIQUE, created_at TEXT NOT NULL, FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS cards (id INTEGER PRIMARY KEY AUTOINCREMENT, deck_id INTEGER NOT NULL, word TEXT NOT NULL, meaning TEXT DEFAULT '', pronunciation TEXT DEFAULT '', example TEXT DEFAULT '', notes TEXT DEFAULT '', tags TEXT DEFAULT '', ease REAL DEFAULT 2.5, interval_days INTEGER DEFAULT 0, repetitions INTEGER DEFAULT 0, due_date TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(deck_id) REFERENCES decks(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, card_id INTEGER, deck_id INTEGER, rating TEXT NOT NULL, reviewed_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE SET NULL, FOREIGN KEY(deck_id) REFERENCES decks(id) ON DELETE SET NULL);
+    CREATE TABLE IF NOT EXISTS exercise_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, topic TEXT NOT NULL, difficulty TEXT NOT NULL, question_type TEXT NOT NULL, correct INTEGER NOT NULL, answer TEXT, expected TEXT, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS usage_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, started_at TEXT NOT NULL, last_seen TEXT NOT NULL, total_seconds INTEGER DEFAULT 0, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
     """)
-    # Lightweight migrations for profile fields.
     existing_cols = {r["name"] for r in con.execute("PRAGMA table_info(users)").fetchall()}
     for col, typ in [("full_name", "TEXT DEFAULT ''"), ("dob", "TEXT DEFAULT ''"), ("profile_pic", "TEXT DEFAULT ''")]:
-        if col not in existing_cols:
-            con.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
-    con.commit()
-    con.close()
+        if col not in existing_cols: con.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
+    con.commit(); con.close()
 
 
 init_db()
@@ -229,8 +273,10 @@ def register(username, password):
             "SELECT id FROM users WHERE username=?", (username,)
         ).fetchone()["id"]
         return f"✅ Tạo account @{username} thành công. Đã đăng nhập.", uid
-    except sqlite3.IntegrityError:
-        return "❌ Username đã tồn tại.", None
+    except Exception as exc:
+        if "duplicate key" in str(exc).lower() or "unique" in str(exc).lower():
+            return "❌ Username đã tồn tại.", None
+        raise
     finally:
         con.close()
 
@@ -581,55 +627,107 @@ def copy_shared_deck(user_id, share_code):
 # SPACED REPETITION
 # ============================================================
 
+def _schedule_for_rating(card, rating):
+    """Return an Anki/SM-2-inspired next interval for a card.
+
+    This keeps the model deliberately simple and transparent: first reviews
+    use distinct learning steps, then mature cards grow from their current
+    interval and ease.
+    """
+    ease = max(1.3, float(card["ease"] or 2.5))
+    reps = int(card["repetitions"] or 0)
+    interval = int(card["interval_days"] or 0)
+    rating = str(rating or "Good")
+
+    if rating == "Again":
+        next_reps = 0
+        next_interval = 1
+        next_ease = max(1.3, ease - 0.20)
+    elif rating == "Hard":
+        next_reps = reps + 1
+        if reps == 0:
+            next_interval = 2
+        elif reps == 1:
+            next_interval = 4
+        else:
+            next_interval = max(2, round(interval * 1.20))
+        next_ease = max(1.3, ease - 0.05)
+    elif rating == "Easy":
+        next_reps = reps + 1
+        if reps == 0:
+            next_interval = 7
+        elif reps == 1:
+            next_interval = 14
+        else:
+            next_interval = max(5, round(interval * ease * 1.30))
+        next_ease = min(3.0, ease + 0.05)
+    else:  # Good
+        next_reps = reps + 1
+        if reps == 0:
+            next_interval = 4
+        elif reps == 1:
+            next_interval = 8
+        else:
+            next_interval = max(3, round(interval * ease))
+        next_ease = ease
+
+    due = date.today() + timedelta(days=next_interval)
+    return {
+        "rating": rating,
+        "interval_days": next_interval,
+        "repetitions": next_reps,
+        "ease": round(next_ease, 2),
+        "due_date": due.isoformat(),
+    }
+
+
+def review_schedule_preview(user_id, card_id):
+    if not user_id or not card_id:
+        return {}
+    con = db()
+    card = con.execute("""
+        SELECT c.* FROM cards c
+        JOIN decks d ON d.id=c.deck_id
+        WHERE c.id=? AND d.owner_id=?
+    """, (int(card_id), user_id)).fetchone()
+    con.close()
+    if not card:
+        return {}
+    return {r: _schedule_for_rating(card, r) for r in ("Again", "Hard", "Good", "Easy")}
+
+
 def review_card(user_id, card_id, rating):
     if not user_id or not card_id:
-        return "🔒 Đăng nhập trước.", refresh_review(user_id)
+        return "🔒 Đăng nhập trước.", None
 
     con = db()
-    card = con.execute(
-        "SELECT * FROM cards WHERE id=?", (int(card_id),)
-    ).fetchone()
+    card = con.execute("""
+        SELECT c.* FROM cards c
+        JOIN decks d ON d.id=c.deck_id
+        WHERE c.id=? AND d.owner_id=?
+    """, (int(card_id), user_id)).fetchone()
     if not card:
         con.close()
-        return "❌ Card không tồn tại.", refresh_review(user_id)
+        return "❌ Card không tồn tại.", None
 
-    ease = float(card["ease"])
-    reps = int(card["repetitions"])
-    interval = int(card["interval_days"])
-
-    # Lightweight SM-2 style scheduling:
-    # Again -> reset; Hard -> shorter interval; Good -> normal growth;
-    # Easy -> stronger growth.
-    if rating == "Again":
-        reps = 0
-        interval = 1
-        ease = max(1.3, ease - 0.20)
-    elif rating == "Hard":
-        reps += 1
-        interval = max(1, round(interval * 1.2)) if interval else 1
-        ease = max(1.3, ease - 0.05)
-    elif rating == "Good":
-        reps += 1
-        interval = 1 if interval == 0 else max(2, round(interval * ease))
-    else:  # Easy
-        reps += 1
-        interval = 2 if interval == 0 else max(3, round(interval * ease * 1.3))
-        ease += 0.05
-
-    due = (date.today() + timedelta(days=interval)).isoformat()
-
+    schedule = _schedule_for_rating(card, rating)
     con.execute("""
         UPDATE cards SET ease=?,interval_days=?,repetitions=?,due_date=?
         WHERE id=?
-    """, (ease, interval, reps, due, card["id"]))
+    """, (schedule["ease"], schedule["interval_days"], schedule["repetitions"], schedule["due_date"], card["id"]))
     con.execute("""
         INSERT INTO reviews(user_id,card_id,deck_id,rating,reviewed_at)
         VALUES(?,?,?,?,?)
     """, (user_id, card["id"], card["deck_id"], rating, now()))
     con.commit()
     con.close()
-    return f"✅ {rating} → ôn lại sau **{interval} ngày**.", refresh_review(user_id)
 
+    due_label = date.fromisoformat(schedule["due_date"]).strftime("%d/%m")
+    return (
+        f"✅ **{rating}** · ôn lại sau **{schedule["interval_days"]} ngày** "
+        f"(**{due_label}**) · độ ổn định {schedule["ease"]:.2f}",
+        schedule,
+    )
 
 def get_due_cards(user_id, deck_id=None):
     if not user_id:
@@ -807,11 +905,9 @@ def dashboard_html(user_id):
     con.close()
     accuracy = round(ex_correct / ex_total * 100) if ex_total else 0
 
-    # GitHub-like learning heatmap: about 12 months, always ending at today.
-    # Keep the current month visible and align month labels to the week where each
-    # month actually starts instead of letting narrow grid cells clip the text.
+    # Codeforces-like contribution graph: 53 columns x 7 rows, ending today.
     end = date.today()
-    start = end - timedelta(days=364)
+    start = end - timedelta(days=370)
     start -= timedelta(days=(start.weekday()+1)%7)  # Sunday
     days = []
     d = start
@@ -820,27 +916,18 @@ def dashboard_html(user_id):
         level = 0 if count == 0 else 1 if count == 1 else 2 if count <= 3 else 3 if count <= 6 else 4
         days.append(f"<span class='heat-cell l{level}' title='{d.isoformat()} · {count} action{'s' if count != 1 else ''}'></span>")
         d += timedelta(days=1)
-    while len(days) % 7:
-        days.append("<span class='heat-cell empty-cell'></span>")
+    while len(days) % 7: days.append("<span class='heat-cell empty-cell'></span>")
     weeks = len(days)//7
-
-    # One label per month, placed in the correct week column. This guarantees
-    # that Oct (the current month) is shown at the right-hand end of the graph.
-    month_labels = ['<span></span>'] * weeks
-    seen_months = set()
-    for week_index in range(weeks):
-        week_date = start + timedelta(days=week_index * 7)
-        month_key = (week_date.year, week_date.month)
-        # Show a month when its first day falls in this week, or when this is the
-        # first visible week of that month.
-        week_end = week_date + timedelta(days=6)
-        first_of_month = date(week_date.year, week_date.month, 1)
-        if week_date <= first_of_month <= week_end:
-            label = week_date.strftime('%b') if week_date.month != first_of_month.month else first_of_month.strftime('%b')
-            month_labels[week_index] = f"<span>{label}</span>"
-            seen_months.add(month_key)
-        elif week_index == 0:
-            month_labels[week_index] = f"<span>{week_date.strftime('%b')}</span>"
+    month_labels=[]
+    seen=set()
+    for i in range(0,len(days),7):
+        week_date=start+timedelta(days=i)
+        label=week_date.strftime('%b')
+        if label not in seen and week_date.month not in (1,):
+            month_labels.append(f"<span>{label}</span>"); seen.add(label)
+        elif week_date.month == 1 and label not in seen:
+            month_labels.append(f"<span>{label}</span>"); seen.add(label)
+        else: month_labels.append('<span></span>')
     recent_html=''.join(f"<div class='recent-row'><span class='recent-dot'></span><div><b>{'Vocabulary review' if r['kind']=='review' else 'Exercise attempt' if r['kind']=='exercise' else 'AI Tutor'}</b><small>{html.escape(str(r['detail']))} · {html.escape(str(r['at']).replace('T',' ')[:16])}</small></div></div>" for r in recent) or '<div class="empty">No activity yet.</div>'
     username, full_name, dob, profile_pic = get_profile(user_id)
     avatar_html = f"<img src='{html.escape(profile_pic, quote=True)}' alt='Profile'>" if profile_pic else "<span>👤</span>"
@@ -871,7 +958,7 @@ def dashboard_html(user_id):
         <div class='dash-stat'><span class='stat-icon'>🎯</span><b>{accuracy}%</b><small>Accuracy</small></div>
       </div>
       <div class='record-grid'>
-        <div class='activity-panel cardish'><div class='panel-head'><div><h3>Learning activity</h3><p>Your study activity over the past year</p></div><span class='legend'>Less <i class='l0'></i><i class='l1'></i><i class='l2'></i><i class='l3'></i><i class='l4'></i> More</span></div>
+        <div class='activity-panel cardish'><div class='panel-head'><div><h3>Contribution activity</h3><p>Study actions over the last year</p></div><span class='legend'>Less <i class='l0'></i><i class='l1'></i><i class='l2'></i><i class='l3'></i><i class='l4'></i> More</span></div>
           <div class='month-labels' style='grid-template-columns:repeat({weeks}, 1fr)'>{''.join(month_labels)}</div>
           <div class='heatmap-wrap'><div class='weekday-labels'><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div><div class='heatmap' style='grid-template-columns:repeat({weeks}, 1fr)'>{''.join(days)}</div></div>
         </div>
@@ -889,52 +976,66 @@ def tracking_html(user_id):
         return "<div class='empty'>🔒 Đăng nhập để xem progress.</div>"
 
     con = db()
-    total = con.execute("""
-        SELECT COUNT(*) n FROM cards c
-        JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=?
-    """, (user_id,)).fetchone()["n"]
+    total = con.execute("""SELECT COUNT(*) n FROM cards c JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=?""", (user_id,)).fetchone()["n"]
+    due = con.execute("""SELECT COUNT(*) n FROM cards c JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=? AND c.due_date<=?""", (user_id, today())).fetchone()["n"]
+    today_reviews = con.execute("SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)=?", (user_id, today())).fetchone()["n"]
+    week_reviews = con.execute("SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)>=date('now','-6 day')", (user_id,)).fetchone()["n"]
+    month_reviews = con.execute("SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)>=date('now','-29 day')", (user_id,)).fetchone()["n"]
+    ex_total = con.execute("SELECT COUNT(*) n FROM exercise_attempts WHERE user_id=?", (user_id,)).fetchone()["n"]
+    ex_correct = con.execute("SELECT COALESCE(SUM(correct),0) n FROM exercise_attempts WHERE user_id=?", (user_id,)).fetchone()["n"]
 
-    due = con.execute("""
-        SELECT COUNT(*) n FROM cards c
-        JOIN decks d ON d.id=c.deck_id
-        WHERE d.owner_id=? AND c.due_date<=?
-    """, (user_id, today())).fetchone()["n"]
-
-    today_reviews = con.execute("""
-        SELECT COUNT(*) n FROM reviews WHERE user_id=? AND date(reviewed_at)=?
-    """, (user_id, today())).fetchone()["n"]
-
-    week_reviews = con.execute("""
-        SELECT COUNT(*) n FROM reviews
-        WHERE user_id=? AND date(reviewed_at)>=date('now','-6 day')
-    """, (user_id,)).fetchone()["n"]
-
-    month_reviews = con.execute("""
-        SELECT COUNT(*) n FROM reviews
-        WHERE user_id=? AND date(reviewed_at)>=date('now','-29 day')
-    """, (user_id,)).fetchone()["n"]
-
-    ex_total = con.execute(
-        "SELECT COUNT(*) n FROM exercise_attempts WHERE user_id=?", (user_id,)
-    ).fetchone()["n"]
-    ex_correct = con.execute(
-        "SELECT COALESCE(SUM(correct),0) n FROM exercise_attempts WHERE user_id=?", (user_id,)
-    ).fetchone()["n"]
+    cards = con.execute("""
+        SELECT c.word,c.meaning,c.ease,c.interval_days,c.repetitions,c.due_date,d.name deck
+        FROM cards c JOIN decks d ON d.id=c.deck_id WHERE d.owner_id=? ORDER BY c.repetitions DESC,c.interval_days DESC,c.word
+    """, (user_id,)).fetchall()
+    review_rows = con.execute("""
+        SELECT date(reviewed_at) d, COUNT(*) n FROM reviews
+        WHERE user_id=? AND date(reviewed_at)>=date('now','-13 day')
+        GROUP BY date(reviewed_at) ORDER BY d
+    """, (user_id,)).fetchall()
     con.close()
 
     accuracy = round(ex_correct / ex_total * 100) if ex_total else 0
+    mastered = sum(1 for c in cards if int(c["repetitions"] or 0) >= 5 or int(c["interval_days"] or 0) >= 30)
+    learning = sum(1 for c in cards if int(c["repetitions"] or 0) <= 1)
+    familiar = max(0, len(cards) - mastered - learning)
+    mastery_avg = round(sum(min(100, 18 + int(c["repetitions"] or 0)*11 + min(30, int(c["interval_days"] or 0))) for c in cards) / len(cards)) if cards else 0
+
+    counts = {str(r["d"]): int(r["n"] or 0) for r in review_rows}
+    chart = []
+    max_count = max([1] + list(counts.values()))
+    for i in range(13, -1, -1):
+        d = date.today() - timedelta(days=i)
+        n = counts.get(d.isoformat(), 0)
+        h = round(100*n/max_count) if n else 4
+        chart.append(f"<div class='bar-col' title='{d.strftime('%d/%m')}: {n} reviews'><div class='bar-value'>{n}</div><div class='bar' style='height:{h}%'></div><span>{d.strftime('%d')}</span></div>")
+
+    top_cards = sorted(cards, key=lambda c: (int(c["repetitions"] or 0), int(c["interval_days"] or 0)), reverse=True)[:8]
+    word_rows=[]
+    for c in top_cards:
+        reps=int(c["repetitions"] or 0); interval=int(c["interval_days"] or 0); score=min(100,18+reps*11+min(30,interval))
+        word_rows.append(f"<div class='mastery-row'><div class='mastery-word'><b>{html.escape(str(c['word']))}</b><small>{html.escape(str(c['deck']))} · {reps} reviews · {interval}d interval</small></div><div class='mastery-track'><i style='width:{score}%'></i></div><strong>{score}%</strong></div>")
 
     return f"""
-    <div class='stats'>
-      <div class='stat'><b>{total}</b><span>Total cards</span></div>
-      <div class='stat'><b>{due}</b><span>Due today</span></div>
-      <div class='stat'><b>{today_reviews}</b><span>Today</span></div>
-      <div class='stat'><b>{week_reviews}</b><span>7 days</span></div>
-      <div class='stat'><b>{month_reviews}</b><span>30 days</span></div>
-      <div class='stat'><b>{accuracy}%</b><span>Exercise accuracy</span></div>
-    </div>
-    <div class='progress-note'>📅 Review history is stored per account and survives refresh/login.</div>
-    """
+    <div class='progress-page'>
+      <div class='progress-hero'>
+        <div><span class='eyebrow'>LEARNING PROGRESS</span><h2>Your spaced-repetition record</h2><p>Track what you have learned, what is due, and how your memory intervals are growing.</p></div>
+        <div class='mastery-ring' style='--p:{mastery_avg}%'><div><b>{mastery_avg}%</b><span>overall mastery</span></div></div>
+      </div>
+      <div class='progress-stats'>
+        <div class='progress-stat'><span>📚</span><b>{total}</b><small>Total words</small></div>
+        <div class='progress-stat'><span>🔔</span><b>{due}</b><small>Due today</small></div>
+        <div class='progress-stat'><span>⚡</span><b>{today_reviews}</b><small>Reviewed today</small></div>
+        <div class='progress-stat'><span>📈</span><b>{week_reviews}</b><small>Last 7 days</small></div>
+        <div class='progress-stat'><span>🎯</span><b>{accuracy}%</b><small>Exercise accuracy</small></div>
+      </div>
+      <div class='progress-grid'>
+        <div class='cardish progress-chart-card'><div class='panel-head'><div><h3>Review rhythm</h3><p>Reviews completed over the last 14 days</p></div><span class='chart-total'>{month_reviews} / 30 days</span></div><div class='bar-chart'>{''.join(chart)}</div></div>
+        <div class='cardish mastery-card'><div class='panel-head'><div><h3>Vocabulary stages</h3><p>Based on repetitions and interval growth</p></div></div><div class='stage-bars'><div><span>Learning</span><i><em style='width:{(learning/len(cards)*100) if cards else 0:.0f}%'></em></i><b>{learning}</b></div><div><span>Familiar</span><i><em style='width:{(familiar/len(cards)*100) if cards else 0:.0f}%'></em></i><b>{familiar}</b></div><div><span>Mastered</span><i><em style='width:{(mastered/len(cards)*100) if cards else 0:.0f}%'></em></i><b>{mastered}</b></div></div><div class='stage-legend'><span>0–1 reviews</span><span>2–4 reviews</span><span>5+ / 30d+</span></div></div>
+      </div>
+      <div class='cardish words-progress'><div class='panel-head'><div><h3>Words you know best</h3><p>Your strongest cards and their current memory interval</p></div></div>{''.join(word_rows) if word_rows else '<div class="empty">Start reviewing vocabulary to build your mastery chart.</div>'}</div>
+      <div class='progress-tip'>💡 <b>How it works:</b> Again resets a card to 1 day, Hard grows slowly, Good grows normally, and Easy grows fastest. Each review changes the next interval instead of using one fixed date.</div>
+    </div>"""
 
 
 # ============================================================
@@ -1544,5 +1645,4 @@ OXYZ_IFRAME = f"""
 <iframe srcdoc="{html.escape(OXYZ_HTML, quote=True)}"
 class="oxyz-frame" title="OXYZ 3D Simulator"></iframe>
 """
-
 
