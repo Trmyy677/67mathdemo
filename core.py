@@ -87,7 +87,7 @@ class _PGCursor:
         sql = sql.replace("date('now','-29 day')", "(CURRENT_DATE - INTERVAL '29 days')")
         # SQLite accepts date(text); PostgreSQL needs an explicit cast.
         for field in ("reviewed_at", "created_at", "started_at"):
-            sql = sql.replace(f"date({field})", f"CAST({field} AS DATE)")
+            sql = sql.replace(f"date({field})", f"CAST(LEFT({field}, 10) AS DATE)")
         return sql
 
     def execute(self, sql, params=None):
