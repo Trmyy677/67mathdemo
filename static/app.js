@@ -68,6 +68,25 @@ async function loadAccount(){if(!me?.logged_in){$('#dashboard').innerHTML='<div 
 $$('[data-atab]').forEach(b=>b.onclick=()=>{$$('[data-atab]').forEach(x=>x.classList.toggle('active',x===b));$$('.apanel').forEach(x=>x.classList.toggle('active',x.id==='account-'+b.dataset.atab));if(b.dataset.atab==='dashboard')loadAccount()});
 
 /* ---------- AI ---------- */
+function renderChat(){
+  const box=$('#chatMessages');
+  if(!box) return;
+  if(!chatHistory.length){
+    box.innerHTML='<div class="chat-empty"><span>✦</span><h3>What are you stuck on?</h3><p>Send a question or upload your worksheet.</p></div>';
+    return;
+  }
+  box.innerHTML=chatHistory.map((m,i)=>{
+    const user=m?.[0]??'';
+    const ai=m?.[1]??'';
+    const userHtml=esc(user).replace(/\n/g,'<br>');
+    const aiHtml=renderAIText(ai);
+    return `<div class="msg-bubble msg-user">${userHtml}</div><div class="msg-bubble msg-ai">${aiHtml}</div>`;
+  }).join('');
+  box.scrollTop=box.scrollHeight;
+  typesetAI();
+}
+
+
 $('#chatImage').onchange=()=>{$('#imageName').textContent=$('#chatImage').files[0]?.name||''};
 $('#chatForm').onsubmit=async e=>{e.preventDefault();const text=$('#chatInput').value.trim(),file=$('#chatImage').files[0];if(!text&&!file)return;const previous=chatHistory.slice();chatHistory.push([text||'📷 Image','Thinking…']);renderChat();let fd=new FormData();fd.append('message',text);fd.append('history',JSON.stringify(previous));if(file)fd.append('image',file);$('#chatInput').value='';try{const d=await api('/api/ai',{method:'POST',body:fd});chatHistory=d.history;renderChat();$('#chatImage').value='';$('#imageName').textContent=''}catch(err){chatHistory=previous;renderChat();toast('AI error: '+err.message)}};
 function escapeMathHtml(s){
