@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#e66b99">
+  <title>67Math — English Math Learning</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+  <script>
+    window.MathJax = {tex:{inlineMath:[['\\(','\\)'],['$','$']], displayMath:[['\\[','\\]'],['$$','$$']]}, svg:{fontCache:'global'}};
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+<body>
+<header class="navbar">
+  <a class="brand" href="#" data-page="home" aria-label="67Math home"><span>67Math</span></a>
+  <nav aria-label="Main navigation">
+    <button data-page="home">Home</button>
+    <button data-page="oxyz">OXYZ</button>
+    <button data-page="vocab">Vocabulary</button>
+    <button data-page="exercise">Exercises</button>
+    <button data-page="ai">AI Tutor</button>
+    <button data-page="account">Account</button>
+  </nav>
+  <div class="actions">
+    <button id="lang" class="action-pill">🇬🇧 EN</button>
+    <button id="theme" class="icon-btn" aria-label="Toggle theme">🌙</button>
+    <button id="accountBtn" class="avatar" aria-label="Account">👤</button>
+  </div>
+</header>
+
+<main>
+  <section id="home" class="page active">
+    <div class="hero">
+      <div class="hero-copy">
+        <span class="eyebrow">ENGLISH MATH LEARNING</span>
+        <h1>Learn math.<br><em>Build confidence.</em></h1>
+        <p>Practice English math vocabulary, visualize OXYZ, solve exercises, keep a learning record and ask an AI tutor when you get stuck.</p>
+        <div class="hero-actions">
+          <button class="primary big-btn" data-page="vocab">Start learning <span>→</span></button>
+          <button class="ghost big-btn" data-page="exercise">Practice exercises</button>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="orbit-card card-glow"><span class="orbit-dot d1"></span><span class="orbit-dot d2"></span><span class="orbit-dot d3"></span><div class="hero-equation">x² + y² + z²</div><div class="hero-caption">Your math workspace</div></div>
+        <div class="mini-feature f1"><b>📐 OXYZ</b><span>3D geometry</span></div>
+        <div class="mini-feature f2"><b>🧠 Vocabulary</b><span>Spaced repetition</span></div>
+        <div class="mini-feature f3"><b>📊 Record</b><span>Codeforces-style activity</span></div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <article><span>01</span><h3>Vocabulary</h3><p>Learn by category, flip real flashcards and review with Again / Hard / Good / Easy.</p></article>
+      <article><span>02</span><h3>Exercises</h3><p>Choose Algebra, Geometry, Calculus, Algorithms, Probability or OXYZ and generate practice.</p></article>
+      <article><span>03</span><h3>AI Tutor</h3><p>Type a question or upload a worksheet image and get a step-by-step explanation.</p></article>
+    </div>
+  </section>
+
+  <section id="oxyz" class="page">
+    <div class="section-head"><div><span class="eyebrow">VISUALIZE</span><h2>OXYZ Simulator</h2><p class="section-sub">Build points, lines, planes, solids and surfaces in 3D.</p></div></div>
+    <iframe class="oxyz" src="/api/oxyz" title="OXYZ 3D Simulator"></iframe>
+  </section>
+
+  <section id="vocab" class="page">
+    <div class="section-head"><div><span class="eyebrow">VOCABULARY</span><h2>Build your math vocabulary</h2><p class="section-sub">Pick a subject first, then study its deck.</p></div><button class="primary" id="openAuthVocab">🔐 Login / Register</button></div>
+    <div class="category-strip" id="vocabCategories">
+      <button class="category-card active" data-vocab-cat="Algebra"><span>∑</span><b>Algebra</b><small>Equations · functions</small></button>
+      <button class="category-card" data-vocab-cat="Geometry"><span>△</span><b>Geometry</b><small>Shapes · angles</small></button>
+      <button class="category-card" data-vocab-cat="Calculus"><span>∫</span><b>Calculus</b><small>Limits · derivatives</small></button>
+      <button class="category-card" data-vocab-cat="Algorithms"><span>⌘</span><b>Algorithms</b><small>CS · problem solving</small></button>
+      <button class="category-card" data-vocab-cat="Probability & Statistics"><span>σ</span><b>Probability</b><small>Data · chance</small></button>
+      <button class="category-card" data-vocab-cat="Oxyz"><span>✦</span><b>OXYZ</b><small>Vectors · planes</small></button>
+    </div>
+    <div class="tabs"><button class="sub active" data-vtab="library">My Library</button><button class="sub" data-vtab="review">Review</button><button class="sub" data-vtab="test">Test</button><button class="sub" data-vtab="progress">Progress</button></div>
+    <div id="v-library" class="vpanel active">
+      <div class="subject-banner"><div><span class="eyebrow">CURRENT DECK</span><h3 id="currentDeckTitle">Algebra</h3><p id="currentDeckDesc">Built-in Algebra vocabulary.</p></div><span id="deckCount" class="count-pill">0 cards</span></div>
+      <div class="two">
+        <div class="card"><div class="panel-title"><div><h3>My decks</h3><p class="muted">Built-in subjects + your custom decks.</p></div></div><div id="decks" class="deck-list"></div><div class="create-deck-box"><input id="deckName" placeholder="New deck name"><input id="deckDesc" placeholder="Description"><button id="createDeck" class="primary">Create</button></div><p id="deckMsg" class="msg"></p></div>
+        <div class="card"><div class="panel-title"><div><h3>Add vocabulary</h3><p class="muted">Add a word to the selected deck.</p></div></div><div class="grid2"><input id="word" placeholder="Word / phrase"><input id="meaning" placeholder="Meaning"><input id="pron" placeholder="Pronunciation / IPA"><input id="example" placeholder="Example"><input id="notes" placeholder="Notes"><input id="tags" placeholder="Tags"></div><button id="addCard" class="primary">＋ Add card</button><div id="cardList"></div></div>
+      </div>
+    </div>
+    <div id="v-review" class="vpanel"><div class="review-layout"><div class="review-info"><span class="eyebrow">SPACED REPETITION</span><h3>One card at a time.</h3><p>Think of the meaning first. Click the card to flip it, then rate how difficult it felt.</p></div><div class="review-main"><div id="flash" class="flash"></div><div class="ratings"><button data-rating="Again">Again</button><button data-rating="Hard">Hard</button><button data-rating="Good" class="primary">Good</button><button data-rating="Easy">Ôn lại sau 2 ngày</button></div><p id="reviewMsg" class="msg"></p></div></div></div>
+    <div id="v-test" class="vpanel"><div class="card test"><div class="test-head"><div><span class="eyebrow">RANDOM TEST</span><h3>Quick vocabulary check</h3></div><div class="inline"><label>Questions <select id="testCount"><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option></select></label><button id="startTest" class="primary">🎲 Random test</button></div></div><div id="testBox"></div></div></div>
+    <div id="v-progress" class="vpanel"><div id="progress"></div></div>
+  </section>
+
+  <section id="exercise" class="page">
+    <div class="section-head"><div><span class="eyebrow">PRACTICE</span><h2>Exercise Generator</h2><p class="section-sub">Choose a subject, difficulty and question format.</p></div></div>
+    <div class="category-strip exercise-cats" id="exerciseCategories">
+      <button class="category-card active" data-excat="Algebra"><span>∑</span><b>Algebra</b><small>Equations · functions</small></button>
+      <button class="category-card" data-excat="Geometry"><span>△</span><b>Geometry</b><small>Coordinate · shapes</small></button>
+      <button class="category-card" data-excat="Calculus"><span>∫</span><b>Calculus</b><small>Derivative · integral</small></button>
+      <button class="category-card" data-excat="Algorithms"><span>⌘</span><b>Algorithms</b><small>Logic · complexity</small></button>
+      <button class="category-card" data-excat="Probability"><span>σ</span><b>Probability</b><small>Chance · statistics</small></button>
+      <button class="category-card" data-excat="Oxyz"><span>✦</span><b>OXYZ</b><small>3D coordinates</small></button>
+    </div>
+    <div class="card exercise-card-shell">
+      <div class="exercise-toolbar"><div><span class="eyebrow">SETUP</span><h3 id="exerciseCategoryTitle">Algebra</h3></div><div class="controls"><select id="topic"></select><select id="difficulty"><option>Easy</option><option selected>Medium</option><option>Hard</option></select><select id="qtype"><option value="mcq">MCQ</option><option value="number">Number</option></select><select id="exCount"><option>5</option><option selected>10</option><option>15</option><option>20</option></select><button id="generate" class="primary">🌷 Generate</button></div></div>
+      <div id="exerciseBox" class="exercise-box empty-state"><div>Choose your settings and generate a set.</div></div>
+      <div class="exercise-footer"><button id="submitEx" class="primary" disabled>✓ Submit answer</button><button id="exAI" class="ghost">🤖 Explain with AI</button><div id="exFeedback" class="feedback"></div></div>
+    </div>
+  </section>
+
+  <section id="ai" class="page">
+    <div class="section-head"><div><span class="eyebrow">AI TUTOR</span><h2>Your math study partner</h2><p class="section-sub">Ask in English or Vietnamese. You can also upload a photo of the problem.</p></div></div>
+    <div class="chat card"><div class="chat-head"><div class="ai-orb">✦</div><div><b>67Math Tutor</b><p>Step-by-step explanations · image questions</p></div></div><div id="chatMessages" class="chat-messages"><div class="chat-empty"><span>✦</span><h3>What are you stuck on?</h3><p>Send a question or upload your worksheet.</p></div></div><form id="chatForm"><textarea id="chatInput" placeholder="Explain this problem step by step..."></textarea><div class="chatbar"><label class="upload">📷 Upload image<input id="chatImage" type="file" accept="image/*"></label><span id="imageName" class="muted"></span><button class="primary">Send</button></div></form></div>
+  </section>
+
+  <section id="account" class="page">
+    <div class="account-hero"><div><span class="eyebrow">ACCOUNT</span><h2>Your learning space</h2><p class="section-sub">Your profile, progress and personal learning record live here.</p></div><div id="accountTopActions" class="account-actions"><span id="accountStatus" class="muted">Not logged in</span><button id="logoutBtn" class="hidden">Logout</button><button id="accountLogin" class="primary">🔐 Login / Register</button></div></div>
+    <div id="accountSummary" class="account-summary"></div>
+    <div class="account-tabs"><button class="sub active" data-atab="dashboard">📊 Dashboard</button><button class="sub" data-atab="profile">👤 Profile</button></div>
+    <div id="account-dashboard" class="apanel active"><div id="dashboard"></div></div>
+    <div id="account-profile" class="apanel"><div class="profile-grid"><div class="card profile-form"><div id="profilePreview"></div><label>Full name<input id="fullName" placeholder="Your full name"></label><label>Date of birth<input id="dob" type="date"></label><label>Profile picture<input id="profilePicture" type="file" accept="image/*"></label><button id="saveProfile" class="primary">Save profile</button><p id="profileMsg" class="msg"></p></div><div class="card profile-side"><span class="eyebrow">ACCOUNT DATA</span><h3>Everything stays linked to your account.</h3><p>Vocabulary reviews, exercise attempts and online time are stored under your account so your record can continue across sessions.</p><div class="profile-points"><span>✓ Vocabulary progress</span><span>✓ Exercise accuracy</span><span>✓ Study streak</span><span>✓ Online time</span></div></div></div></div>
+  </section>
+</main>
+
+<div id="authModal" class="modal hidden" aria-hidden="true">
+  <div class="backdrop"></div>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <button id="closeAuth" class="close" aria-label="Close">×</button>
+    <div class="auth-head"><span class="eyebrow">WELCOME TO 67MATH</span><h2 id="authTitle">Your learning account</h2><p>Sign in to save vocabulary, exercises and your study record.</p></div>
+    <div class="auth-tabs"><button class="sub active" data-auth="login">Login</button><button class="sub" data-auth="register">Create account</button></div>
+    <form id="loginForm"><label>Username<input id="loginUser" autocomplete="username" placeholder="Username" required></label><label>Password<input id="loginPass" type="password" autocomplete="current-password" placeholder="Password" required></label><button class="primary auth-submit">Login</button></form>
+    <form id="registerForm" class="hidden"><label>Username<input id="regUser" autocomplete="username" placeholder="3–32 characters" required></label><label>Password<input id="regPass" type="password" autocomplete="new-password" placeholder="At least 6 characters" required></label><button class="primary auth-submit">Create account</button></form>
+    <p id="authMsg" class="msg"></p>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
